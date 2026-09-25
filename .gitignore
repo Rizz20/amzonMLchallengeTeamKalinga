@@ -1,0 +1,28 @@
+# Datasets (Uploaded directly to Kaggle / local storage)
+dataset/
+*.tsv
+*.csv
+
+# Model weights and artifacts
+models/*.pkl
+models/*.joblib
+models/*.pt
+models/*.bin
+
+# Generated submission outputs and archives
+output/*.tsv
+*.zip
+
+# Python & environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.ipynb_checkpoints/
+*.log
+
+# IDE
+.vscode/
+.idea/
