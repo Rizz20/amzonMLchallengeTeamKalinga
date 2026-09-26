@@ -2,6 +2,7 @@ import csv
 from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 from sklearn.feature_extraction.text import TfidfVectorizer
 import torch
 
@@ -110,54 +111,61 @@ class SparseRetriever:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Returns (indices, scores) of shape (n_queries, top_k).
+        Fully vectorized — no Python row loop.
         """
         n_queries = len(query_texts)
         n_index = len(index_texts)
         top_k = min(top_k, n_index)
-        
+
         if top_k == 0:
             return np.empty((n_queries, 0), dtype=int), np.empty((n_queries, 0), dtype=np.float32)
 
         # Fit TF-IDF on candidate pool and transform queries
-        index_matrix = self.vectorizer.fit_transform(index_texts)
-        query_matrix = self.vectorizer.transform(query_texts)
+        index_matrix = self.vectorizer.fit_transform(index_texts)  # (n_index, vocab)
+        query_matrix = self.vectorizer.transform(query_texts)       # (n_queries, vocab)
 
-        # Cosine similarity via sparse dot product
-        # index_matrix is already L2 normalized by TfidfVectorizer
-        sim_matrix = query_matrix.dot(index_matrix.T)
+        # Cosine similarity via sparse dot product → (n_queries, n_index)
+        sim_matrix = query_matrix.dot(index_matrix.T)  # sparse CSR
 
-        all_indices = []
-        all_scores = []
-
-        for row_idx in range(n_queries):
-            row = sim_matrix.getrow(row_idx)
-            if row.nnz == 0:
-                all_indices.append(np.full(top_k, -1, dtype=int))
-                all_scores.append(np.zeros(top_k, dtype=np.float32))
-                continue
-
-            row_data = row.data
-            row_cols = row.indices
-
-            if len(row_data) > top_k:
-                top_part_idx = np.argpartition(row_data, -top_k)[-top_k:]
-                sorted_part_idx = top_part_idx[np.argsort(-row_data[top_part_idx])]
-                top_cols = row_cols[sorted_part_idx]
-                top_vals = row_data[sorted_part_idx]
+        # Convert to dense only if small enough; otherwise use efficient sparse approach
+        if n_queries * n_index <= 50_000_000:
+            # Dense path: fast numpy argpartition over full matrix
+            dense = np.asarray(sim_matrix.todense(), dtype=np.float32)  # (n_queries, n_index)
+            if top_k >= n_index:
+                # Return all indices sorted by score descending
+                sort_idx = np.argsort(-dense, axis=1)  # (n_queries, n_index)
+                all_indices = sort_idx[:, :top_k]
+                all_scores = np.take_along_axis(dense, all_indices, axis=1)
             else:
-                sort_idx = np.argsort(-row_data)
-                top_cols = row_cols[sort_idx]
-                top_vals = row_data[sort_idx]
-                # Pad to top_k if fewer non-zero entries exist
-                pad_size = top_k - len(top_cols)
-                if pad_size > 0:
-                    top_cols = np.pad(top_cols, (0, pad_size), constant_values=-1)
-                    top_vals = np.pad(top_vals, (0, pad_size), constant_values=0.0)
+                # Partial sort via argpartition for speed
+                part_idx = np.argpartition(-dense, top_k, axis=1)[:, :top_k]  # (n_queries, top_k)
+                top_vals = np.take_along_axis(dense, part_idx, axis=1)
+                sort_within = np.argsort(-top_vals, axis=1)
+                all_indices = np.take_along_axis(part_idx, sort_within, axis=1)
+                all_scores = np.take_along_axis(top_vals, sort_within, axis=1)
+            # Mark zero-score slots as -1 (no match)
+            all_indices = np.where(all_scores > 0, all_indices, -1)
+        else:
+            # Sparse path for very large matrices: process in row-chunks to avoid OOM
+            sim_csr = sim_matrix.tocsr()
+            all_indices = np.full((n_queries, top_k), -1, dtype=np.intp)
+            all_scores = np.zeros((n_queries, top_k), dtype=np.float32)
+            chunk = 10_000
+            for start in range(0, n_queries, chunk):
+                end = min(start + chunk, n_queries)
+                block = np.asarray(
+                    sim_csr[start:end].todense(), dtype=np.float32
+                )  # (chunk, n_index)
+                k = min(top_k, block.shape[1])
+                part = np.argpartition(-block, k, axis=1)[:, :k]
+                vals = np.take_along_axis(block, part, axis=1)
+                order = np.argsort(-vals, axis=1)
+                idx = np.take_along_axis(part, order, axis=1)
+                v = np.take_along_axis(vals, order, axis=1)
+                all_indices[start:end, :k] = np.where(v > 0, idx, -1)
+                all_scores[start:end, :k] = v
 
-            all_indices.append(top_cols)
-            all_scores.append(top_vals)
-
-        return np.array(all_indices), np.array(all_scores)
+        return all_indices, all_scores
 
 
 def run_blocking(
@@ -275,8 +283,14 @@ def run_blocking(
                         "is_in_dense": 1,
                     }
 
-            # Collect pairs for this S1 entity
-            for cand_data in seen_cands.values():
+            # Collect pairs for this S1 entity, capped at MAX_UNION_CANDIDATES
+            # Sort so that dual-channel matches (in both sparse+dense) are preferred
+            cand_list = sorted(
+                seen_cands.values(),
+                key=lambda x: (-(x["is_in_sparse"] + x["is_in_dense"]),
+                               -(x["dense_score"] + x["sparse_score"])),
+            )
+            for cand_data in cand_list[:MAX_UNION_CANDIDATES]:
                 all_pairs.append(cand_data)
 
     candidate_pairs_df = pd.DataFrame(all_pairs)
