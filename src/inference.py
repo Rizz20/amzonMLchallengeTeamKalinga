@@ -81,8 +81,8 @@ def run_inference(
     # Fast lookup for candidate validation: s1_id -> set of candidate IDs
     valid_cands_map: Dict[str, Set[str]] = {s1: set() for s1 in all_test_s1_ids}
     if not candidate_pairs_df.empty:
-        for _, row in candidate_pairs_df.iterrows():
-            valid_cands_map[row["source1_entity_id"]].add(row["candidate_entity_id"])
+        for s1_id, grp in candidate_pairs_df.groupby("source1_entity_id")["candidate_entity_id"]:
+            valid_cands_map[s1_id] = set(grp)
 
     # 5. Load model and config
     model_file = models_dir / "lgbm_model.pkl"
@@ -127,14 +127,11 @@ def run_inference(
         # Filter by threshold tau
         high_prob_pairs = test_feats_df[test_feats_df["pred_prob"] >= tau]
 
-        for _, row in high_prob_pairs.iterrows():
-            s1_id = row["source1_entity_id"]
-            cand_id = row["candidate_entity_id"]
-            
-            # Strict subset enforcement: Cand ID MUST be in candidate_pairs for that S1
-            if cand_id in valid_cands_map[s1_id]:
-                if cand_id not in matched_results_map[s1_id]:
-                    matched_results_map[s1_id].append(cand_id)
+        # All rows in test_feats_df originate from candidate_pairs_df → already valid.
+        # Group by s1 entity to build matched_results_map in one pass.
+        for s1_id, grp in high_prob_pairs.groupby("source1_entity_id")["candidate_entity_id"]:
+            # dict.fromkeys preserves insertion order while deduplicating
+            matched_results_map[s1_id] = list(dict.fromkeys(grp))
 
     # 7. Write output/matching_results.tsv
     print(f"\nWriting matching results to {matching_out_path}...")

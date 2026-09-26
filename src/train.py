@@ -133,25 +133,29 @@ def train_pipeline(
         train_pairs_df, train_s1_df, s2_df, s3_df, s1_embs_train, cand_embs_train
     )
     # Add target label
-    train_labels = [
-        1 if row["candidate_entity_id"] in gt_map.get(row["source1_entity_id"], set()) else 0
-        for _, row in train_feats_df.iterrows()
-    ]
-    train_feats_df["target"] = train_labels
+    # Vectorized label assignment — explode gt_map to a DataFrame and merge
+    gt_pairs_df = pd.DataFrame(
+        [(s1, cid) for s1, cids in gt_map.items() for cid in cids],
+        columns=["source1_entity_id", "candidate_entity_id"],
+    )
+    gt_pairs_df["target"] = 1
+    train_feats_df = train_feats_df.merge(
+        gt_pairs_df, on=["source1_entity_id", "candidate_entity_id"], how="left"
+    )
+    train_feats_df["target"] = train_feats_df["target"].fillna(0).astype(int)
 
     print("Extracting pairwise features for validation pairs...")
     val_feats_df = extract_pairwise_features(
         val_pairs_df, val_s1_df, s2_df, s3_df, s1_embs_val, cand_embs_val
     )
-    val_labels = [
-        1 if row["candidate_entity_id"] in gt_map.get(row["source1_entity_id"], set()) else 0
-        for _, row in val_feats_df.iterrows()
-    ]
-    val_feats_df["target"] = val_labels
+    val_feats_df = val_feats_df.merge(
+        gt_pairs_df, on=["source1_entity_id", "candidate_entity_id"], how="left"
+    )
+    val_feats_df["target"] = val_feats_df["target"].fillna(0).astype(int)
 
-    n_pos = sum(train_labels)
-    n_neg = len(train_labels) - n_pos
-    pos_weight = (n_neg / max(1, n_pos))
+    n_pos = int(train_feats_df["target"].sum())
+    n_neg = len(train_feats_df) - n_pos
+    pos_weight = n_neg / max(1, n_pos)
     print(f"Training pairs class balance: {n_pos} positive, {n_neg} negative (scale_pos_weight: {pos_weight:.2f})")
 
     # 6. Train LightGBM Model
