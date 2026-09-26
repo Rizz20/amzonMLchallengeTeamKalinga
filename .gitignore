@@ -1,0 +1,31 @@
+# Dataset (large TSV files — share via Kaggle dataset, not git)
+6ab10eb3b23ba_student_resource/
+Business_Entity_Resolution_Blueprint.pdf
+6ab5628d5a817_amazon_ml_challenge_problem_statement.pdf
+
+# macOS metadata
+__MACOSX/
+.DS_Store
+
+# Virtual environment
+.venv/
+
+# Model artifacts & outputs (large files, not committed)
+models/
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
